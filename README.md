@@ -12,12 +12,12 @@ or a file in this repository.
 
 | File | Purpose |
 | --- | --- |
-| `Test-RelayVaultPrereqs.ps1` | Read-only preflight check for a Windows Server that will run the edge agent |
+| `Test-TandemPrereqs.ps1` | Read-only preflight check for a Windows Server that will run the edge agent |
 | `SHA256SUMS` | SHA-256 checksums for every file published here |
 
 ## Prerequisite doctor
 
-`Test-RelayVaultPrereqs.ps1` is a read-only PowerShell 5.1 preflight, so it runs
+`Test-TandemPrereqs.ps1` is a read-only PowerShell 5.1 preflight, so it runs
 on a stock Windows Server 2022 with nothing installed first. It reports whether a
 server is ready for the edge agent; it does not change the server.
 
@@ -31,11 +31,11 @@ check against the Relay Vault host.
 
 ```powershell
 Invoke-WebRequest `
-  -Uri https://raw.githubusercontent.com/relayvault/tandem-resources/main/Test-RelayVaultPrereqs.ps1 `
-  -OutFile .\Test-RelayVaultPrereqs.ps1
+  -Uri https://raw.githubusercontent.com/relayvault/tandem-resources/main/Test-TandemPrereqs.ps1 `
+  -OutFile .\Test-TandemPrereqs.ps1
 
-Unblock-File .\Test-RelayVaultPrereqs.ps1
-Get-FileHash .\Test-RelayVaultPrereqs.ps1 -Algorithm SHA256
+Unblock-File .\Test-TandemPrereqs.ps1
+Get-FileHash .\Test-TandemPrereqs.ps1 -Algorithm SHA256
 ```
 
 Compare the result against `SHA256SUMS` in this repository before running it.
@@ -50,7 +50,7 @@ and checksummed before it executes.
 ### Run
 
 ```powershell
-.\Test-RelayVaultPrereqs.ps1
+.\Test-TandemPrereqs.ps1
 ```
 
 To include the database version, schema, and grant checks, supply a credential
@@ -58,7 +58,7 @@ so no password appears on the command line or in PowerShell history:
 
 ```powershell
 $credential = Get-Credential
-.\Test-RelayVaultPrereqs.ps1 -DbCredential $credential -DbName opendental
+.\Test-TandemPrereqs.ps1 -DbCredential $credential -DbName opendental
 ```
 
 Without `-DbCredential` every other check still runs and the database checks are
@@ -68,7 +68,7 @@ If host policy blocks a script you have already reviewed, this invocation is
 process-scoped and does not change the machine policy:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-RelayVaultPrereqs.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-TandemPrereqs.ps1
 ```
 
 ### What it checks

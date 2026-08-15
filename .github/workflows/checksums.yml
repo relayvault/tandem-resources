@@ -1,0 +1,44 @@
+name: Verify published checksums
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  checksums:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify checksum coverage and contents
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tracked_files="$(mktemp)"
+          checksum_files="$(mktemp)"
+          missing_files="$(mktemp)"
+          extra_files="$(mktemp)"
+          trap 'rm -f "$tracked_files" "$checksum_files" "$missing_files" "$extra_files"' EXIT
+
+          git ls-files | grep -Ev '^(README\.md|SHA256SUMS|\.github/)' | sort > "$tracked_files" || true
+          awk '{ print $2 }' SHA256SUMS | sort > "$checksum_files"
+
+          comm -23 "$tracked_files" "$checksum_files" > "$missing_files"
+          if [ -s "$missing_files" ]; then
+            echo "Tracked published files missing from SHA256SUMS:"
+            cat "$missing_files"
+            exit 1
+          fi
+
+          comm -13 "$tracked_files" "$checksum_files" > "$extra_files"
+          if [ -s "$extra_files" ]; then
+            echo "SHA256SUMS contains files that are not published tracked files:"
+            cat "$extra_files"
+            exit 1
+          fi
+
+          sha256sum -c SHA256SUMS
