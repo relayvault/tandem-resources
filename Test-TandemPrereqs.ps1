@@ -19,11 +19,11 @@
     in memory only and is never printed or passed as a command-line argument.
 
 .EXAMPLE
-    .\Test-RelayVaultPrereqs.ps1
+    .\Test-TandemPrereqs.ps1
 
 .EXAMPLE
     $cred = Get-Credential
-    .\Test-RelayVaultPrereqs.ps1 -DbCredential $cred -DbName opendental `
+    .\Test-TandemPrereqs.ps1 -DbCredential $cred -DbName opendental `
         -OutFile C:\Temp\relay-vault-doctor.txt
 #>
 
