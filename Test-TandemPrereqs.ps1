@@ -24,7 +24,7 @@
 .EXAMPLE
     $cred = Get-Credential
     .\Test-TandemPrereqs.ps1 -DbCredential $cred -DbName opendental `
-        -OutFile C:\Temp\relay-vault-doctor.txt
+        -OutFile C:\Temp\tandem-doctor.txt
 #>
 
 [CmdletBinding()]
@@ -50,13 +50,16 @@ param(
     [PSCredential]$DbCredential,
 
     [Parameter(Mandatory = $false)]
+    [string]$MySqlPath,
+
+    [Parameter(Mandatory = $false)]
     [string]$RelayVaultUrl = "https://relay-vault.onrender.com",
 
     [Parameter(Mandatory = $false)]
-    [string]$InstallDirectory = "C:\Program Files\Relay Vault",
+    [string]$InstallDirectory = "C:\Program Files\Tandem",
 
     [Parameter(Mandatory = $false)]
-    [string]$ServiceName = "RelayVaultEdgeAgent"
+    [string]$ServiceName = "TandemEdgeAgent"
 )
 
 Set-StrictMode -Version 2.0
@@ -66,6 +69,9 @@ $script:Statuses = @()
 $script:CertificateSubject = $null
 $script:CertificateIssuer = $null
 $script:CertificateErrors = $null
+$script:IsServerSku = $null
+$script:DefenderStatus = $null
+$script:DefenderStatusAvailable = $false
 
 function Format-OneLine {
     param([AllowNull()][object]$Value)
@@ -151,6 +157,111 @@ function Find-Executable {
     return $null
 }
 
+function Find-MySqlClient {
+    $roots = @(
+        (Join-Path $env:ProgramFiles "MariaDB"),
+        (Join-Path ${env:ProgramFiles(x86)} "MariaDB"),
+        (Join-Path $env:ProgramFiles "MySQL"),
+        (Join-Path ${env:ProgramFiles(x86)} "MySQL"),
+        (Join-Path $env:ProgramFiles "MySQL\MySQL Server")
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($MySqlPath)) {
+        if (-not (Test-Path -LiteralPath $MySqlPath)) {
+            return [pscustomobject]@{
+                Path = $null
+                Source = "explicit path does not exist"
+                ExplicitPathInvalid = $true
+            }
+        }
+        if (-not (Test-Path -LiteralPath $MySqlPath -PathType Leaf)) {
+            return [pscustomobject]@{
+                Path = $null
+                Source = "explicit path is not a file"
+                ExplicitPathInvalid = $true
+            }
+        }
+        try {
+            $resolvedPath = (Resolve-Path -LiteralPath $MySqlPath).Path
+            $null = & $resolvedPath "--version" 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                return [pscustomobject]@{
+                    Path = $null
+                    Source = "explicit path is not a usable MySQL client"
+                    ExplicitPathInvalid = $true
+                }
+            }
+        } catch {
+            return [pscustomobject]@{
+                Path = $null
+                Source = "explicit path is not a usable MySQL client"
+                ExplicitPathInvalid = $true
+            }
+        }
+        return [pscustomobject]@{
+            Path = $resolvedPath
+            Source = "explicit -MySqlPath"
+            ExplicitPathInvalid = $false
+        }
+    }
+
+    $pathClient = Find-Executable "mysql.exe" $roots
+    if ($null -ne $pathClient) {
+        return [pscustomobject]@{
+            Path = $pathClient
+            Source = "PATH or common installation location"
+            ExplicitPathInvalid = $false
+        }
+    }
+
+    try {
+        $services = @(Get-CimInstance Win32_Service -ErrorAction Stop | Where-Object {
+            $_.PathName -match "(?i)(mysqld|mariadb)"
+        })
+        foreach ($service in $services) {
+            $pathName = [Environment]::ExpandEnvironmentVariables([string]$service.PathName)
+            $binaryMatch = [regex]::Match($pathName, '^\s*"([^"]+\.exe)"|^\s*(\S+\.exe)')
+            if (-not $binaryMatch.Success) {
+                continue
+            }
+
+            $binaryPath = $binaryMatch.Groups[1].Value
+            if ([string]::IsNullOrWhiteSpace($binaryPath)) {
+                $binaryPath = $binaryMatch.Groups[2].Value
+            }
+            if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) {
+                continue
+            }
+
+            $binaryDirectory = Split-Path -Parent $binaryPath
+            $binaryParent = Split-Path -Parent $binaryDirectory
+            $candidates = @(
+                (Join-Path $binaryDirectory "mysql.exe"),
+                (Join-Path (Join-Path $binaryParent "bin") "mysql.exe")
+            )
+            foreach ($candidate in $candidates) {
+                if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                    return [pscustomobject]@{
+                        Path = (Resolve-Path -LiteralPath $candidate).Path
+                        Source = "Windows service '{0}' ({1})" -f $service.Name, $binaryPath
+                        ExplicitPathInvalid = $false
+                    }
+                }
+            }
+        }
+    } catch {
+        # Service discovery is best effort; the existing common-location result
+        # remains authoritative when this metadata is unavailable.
+        Write-Verbose "MariaDB/MySQL service discovery was unavailable."
+    }
+
+    return [pscustomobject]@{
+        Path = $null
+        Source = "no client discovered"
+        ExplicitPathInvalid = $false
+    }
+}
+
 function Test-TcpPort {
     param(
         [string]$HostName,
@@ -176,7 +287,7 @@ function Test-TcpPort {
 function Invoke-MySqlMetadataQuery {
     param([string]$Sql)
 
-    if ($null -eq $script:MySqlPath -or $null -eq $DbCredential) {
+    if ($null -eq $script:MySqlClientPath -or $null -eq $DbCredential) {
         return [pscustomobject]@{ Success = $false; Output = @() }
     }
 
@@ -185,7 +296,7 @@ function Invoke-MySqlMetadataQuery {
     $env:MYSQL_PWD = $DbCredential.GetNetworkCredential().Password
     try {
         $output = @(
-            & $script:MySqlPath `
+            & $script:MySqlClientPath `
                 "--protocol=TCP" `
                 "--host=$DbHost" `
                 "--port=$DbPort" `
@@ -240,6 +351,7 @@ function Test-Host {
     try {
         $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
         $computer = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+        $script:IsServerSku = ($os.ProductType -eq 2 -or $os.ProductType -eq 3)
         Add-Check "Host" "Pass" ("Edition={0}; Build={1}; Architecture={2}; PowerShell={3}" -f `
                 (Format-OneLine $os.Caption), (Format-OneLine $os.BuildNumber), `
                 (Format-OneLine $computer.SystemType), $PSVersionTable.PSVersion.ToString())
@@ -337,14 +449,8 @@ function Test-Node {
 }
 
 function Test-Database {
-    $roots = @(
-        (Join-Path $env:ProgramFiles "MariaDB"),
-        (Join-Path ${env:ProgramFiles(x86)} "MariaDB"),
-        (Join-Path $env:ProgramFiles "MySQL"),
-        (Join-Path ${env:ProgramFiles(x86)} "MySQL"),
-        (Join-Path $env:ProgramFiles "MySQL\MySQL Server")
-    )
-    $script:MySqlPath = Find-Executable "mysql.exe" $roots
+    $mysqlDiscovery = Find-MySqlClient
+    $script:MySqlClientPath = $mysqlDiscovery.Path
     $listening = Test-TcpPort $DbHost $DbPort
     if (-not $listening) {
         Add-Check "MariaDB/MySQL listener" "Fail" ("No local TCP listener responded at {0}:{1}." -f $DbHost, $DbPort)
@@ -352,15 +458,22 @@ function Test-Database {
         Add-Check "MariaDB/MySQL listener" "Pass" ("A local TCP listener responded at {0}:{1}." -f $DbHost, $DbPort)
     }
 
-    if ($null -eq $script:MySqlPath) {
-        Add-Check "MariaDB/MySQL client" "Unknown" "mysql.exe was not found; database metadata checks cannot run without installing or locating a client."
+    if ($null -eq $script:MySqlClientPath) {
+        if ($mysqlDiscovery.ExplicitPathInvalid) {
+            Add-Check "MariaDB/MySQL client" "Fail" ("The supplied -MySqlPath is unusable ({0}): {1}" -f `
+                    $mysqlDiscovery.Source, (Format-OneLine $MySqlPath))
+        } else {
+            Add-Check "MariaDB/MySQL client" "Unknown" "mysql.exe was not found on PATH, in common locations, beside the MariaDB/MySQL service, or via -MySqlPath."
+        }
         Add-Check "Open Dental database" "Unknown" "Could not check schema presence because mysql.exe is unavailable."
+        Add-Check "MariaDB/MySQL version" "Unknown" "Could not read the database server version because mysql.exe is unavailable."
         Add-Check "Open Dental version" "Unknown" "Could not read preference metadata because mysql.exe is unavailable."
         Add-Check "MariaDB grants" "Unknown" "Could not read grants because mysql.exe is unavailable."
         return
     }
 
-    Add-Check "MariaDB/MySQL client" "Pass" ("Using the existing client at {0}." -f (Format-OneLine $script:MySqlPath))
+    Add-Check "MariaDB/MySQL client" "Pass" ("Using the existing client at {0}; discovered via {1}." -f `
+            (Format-OneLine $script:MySqlClientPath), (Format-OneLine $mysqlDiscovery.Source))
     if ($null -eq $DbCredential) {
         Add-Check "Open Dental database" "Unknown" "No PSCredential was supplied; no database connection was attempted."
         Add-Check "Open Dental version" "Unknown" "No PSCredential was supplied; no preference metadata was read."
@@ -562,33 +675,56 @@ function Test-ServiceCapability {
 }
 
 function Test-Antivirus {
+    $defenderCommand = Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue
+    if ($null -ne $defenderCommand) {
+        try {
+            $script:DefenderStatus = Get-MpComputerStatus -ErrorAction Stop
+            $script:DefenderStatusAvailable = $true
+        } catch {
+            $script:DefenderStatus = $null
+            $script:DefenderStatusAvailable = $false
+        }
+    }
+
     $products = @()
     try {
         $products = @(Get-CimInstance -Namespace "root\SecurityCenter2" -ClassName AntiVirusProduct -ErrorAction Stop)
         if ($products.Count -eq 0) {
-            Add-Check "Antivirus products" "Warn" "No antivirus product was reported by Windows Security Center."
+            if ($script:DefenderStatusAvailable) {
+                $defenderState = if ($script:DefenderStatus.RealTimeProtectionEnabled) { "enabled" } else { "not enabled" }
+                $hostKind = if ($script:IsServerSku -eq $true) { "Windows Server SKU" } else { "this host" }
+                Add-Check "Antivirus products" "Pass" ("Security Center reported no products on this {0}; the antivirus status is Defender-derived and real-time protection is {1}." -f $hostKind, $defenderState)
+            } else {
+                Add-Check "Antivirus products" "Warn" "No antivirus product was reported by Windows Security Center, and Defender status was unavailable."
+            }
         } else {
             $names = @($products | ForEach-Object { Format-OneLine $_.displayName })
             Add-Check "Antivirus products" "Pass" ("Security Center reports: {0}" -f ($names -join ", "))
         }
     } catch {
-        Add-Check "Antivirus products" "Unknown" "Security Center data was unavailable; elevation or endpoint-management policy may restrict it."
+        if ($script:DefenderStatusAvailable) {
+            $defenderState = if ($script:DefenderStatus.RealTimeProtectionEnabled) { "enabled" } else { "not enabled" }
+            $hostKind = if ($script:IsServerSku -eq $true) { "Windows Server SKU" } else { "this host" }
+            Add-Check "Antivirus products" "Pass" ("Security Center is unavailable on this {0}; the antivirus status is Defender-derived and real-time protection is {1}." -f $hostKind, $defenderState)
+        } else {
+            Add-Check "Antivirus products" "Unknown" "Neither Security Center nor Defender status was available, so the antivirus product could not be identified."
+        }
     }
 
-    try {
-        $defenderCommand = Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue
-        if ($null -eq $defenderCommand) {
-            Add-Check "Defender real-time protection" "Unknown" "Get-MpComputerStatus is unavailable on this host."
-        } else {
-            $defender = Get-MpComputerStatus -ErrorAction Stop
-            if ($defender.RealTimeProtectionEnabled) {
+    if ($null -eq $defenderCommand) {
+        Add-Check "Defender real-time protection" "Unknown" "Get-MpComputerStatus is unavailable on this host."
+    } elseif (-not $script:DefenderStatusAvailable) {
+        Add-Check "Defender real-time protection" "Unknown" "Could not read Defender real-time protection status."
+    } else {
+        try {
+            if ($script:DefenderStatus.RealTimeProtectionEnabled) {
                 Add-Check "Defender real-time protection" "Pass" "Microsoft Defender real-time protection is enabled."
             } else {
                 Add-Check "Defender real-time protection" "Warn" "Microsoft Defender real-time protection is not enabled."
             }
+        } catch {
+            Add-Check "Defender real-time protection" "Unknown" "Could not read Defender real-time protection status."
         }
-    } catch {
-        Add-Check "Defender real-time protection" "Unknown" "Could not read Defender real-time protection status."
     }
 
     try {
