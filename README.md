@@ -82,6 +82,14 @@ outbound HTTPS reachability with certificate subject, issuer and trust errors,
 plus system and WinHTTP proxy settings, which is where TLS interception shows up;
 a DPAPI machine-scope protect/unprotect round-trip performed entirely in memory;
 service-registration privilege; and antivirus/Defender presence and exclusions.
+The doctor finds the existing MariaDB/MySQL client on its own, including from
+the running database service, and accepts `-MySqlPath` when automatic discovery
+cannot locate it. On Windows Server, antivirus status may be Defender-derived
+when the client-only Security Center inventory is unavailable.
+
+The intended installation defaults are `C:\Program Files\Tandem` and the
+`TandemEdgeAgent` service name. The doctor reports whether that service already
+exists before installation.
 
 Each check reports `Pass`, `Fail`, `Warn` or `Unknown`, followed by an overall
 readiness summary.
