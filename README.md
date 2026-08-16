@@ -13,7 +13,14 @@ or a file in this repository.
 | File | Purpose |
 | --- | --- |
 | `Test-TandemPrereqs.ps1` | Read-only preflight check for a Windows Server that will run the edge agent |
+| `New-TandemAgentDbAccount.ps1` | Creates the least-privilege, read-only `tandem_agent` database account |
+| `Export-TandemSchema.ps1` | Read-only capture of Open Dental column definitions, for compatibility review |
+| `Install-TandemAgent.ps1` | Installs the edge agent and pairs it to a practice using a connection code |
+| `relay-vault-edge-agent.cjs` | The edge agent itself, as a single file run by Node.js |
 | `SHA256SUMS` | SHA-256 checksums for every file published here |
+
+The expected order is: check the server, create the database account, capture the
+schema, then install and pair the agent.
 
 ## Prerequisite doctor
 
@@ -88,16 +95,17 @@ cannot locate it. On Windows Server, antivirus status may be Defender-derived
 when the client-only Security Center inventory is unavailable.
 
 The intended installation defaults are `C:\Program Files\Tandem` and the
-`TandemEdgeAgent` service name. The doctor reports whether that service already
-exists before installation.
+`TandemEdgeAgent` name, which the installer registers as a startup scheduled task
+rather than a Windows service.
 
 Each check reports `Pass`, `Fail`, `Warn` or `Unknown`, followed by an overall
 readiness summary.
 
 Two results are worth knowing in advance:
 
-- **No Node.js installed is a `Pass`, not a problem.** The agent ships as a
-  self-contained executable. Installing Node on the server is unnecessary.
+- **Node.js 22 or newer is required**, and the doctor fails if it is missing or
+  older. Install the current Node.js 22 LTS MSI from https://nodejs.org/en/download
+  before installing the agent.
 - **Connecting as `root` is flagged.** That is not a failure, but the printed
   grants are used to create a dedicated least-privilege database account for the
   agent, which should not run as `root`.
@@ -106,6 +114,71 @@ Send the report back to Relay Vault. The output contains host and account
 metadata, versions, grants and connection diagnostics only. Password hashes in
 grant output are redacted, and the script self-tests that redaction against
 planted secrets before printing anything real.
+
+## Database account
+
+`New-TandemAgentDbAccount.ps1` creates `tandem_agent` — the account the agent
+connects with — at both `localhost` and `127.0.0.1`, because which host form a
+loopback connection matches depends on the server's name-resolution setting, and
+getting it wrong produces an access-denied that looks like a wrong password.
+
+The account is granted `SELECT` on the Open Dental database and nothing else. It
+has no `INSERT`, `UPDATE`, `DELETE` or `GRANT OPTION`, so the agent is
+structurally incapable of changing patient data. The script proves this rather
+than asserting it: after creating the account it performs a read, then attempts a
+write that must be denied, and reports both.
+
+```powershell
+.\New-TandemAgentDbAccount.ps1
+```
+
+It prompts for the database root password, generates the new account's password
+locally, prints it once and copies it to the clipboard. Store it in a password
+manager before closing the window — the installer prompts for it. Do not
+screenshot that window; the printed grants are safe to share, the password line
+is not. Re-running the script resets the password and re-applies the grants,
+which is also the rotation path.
+
+## Schema capture
+
+`Export-TandemSchema.ps1` connects as `tandem_agent` and writes the practice's
+Open Dental column definitions and version rows to three TSV files. It reads
+`information_schema` and two configuration rows only — no patient data — so the
+output can be reviewed before it is sent anywhere.
+
+```powershell
+.\Export-TandemSchema.ps1
+```
+
+This exists because an agent proven against one Open Dental release can depend on
+a column that a different release does not have. Capturing the schema turns that
+from an assumption into a fact before anything writes.
+
+## Installing the agent
+
+Run `Install-TandemAgent.ps1` from an elevated PowerShell window, with the
+connection code shown in the Relay Vault app under Settings → Computers. The app
+prints the exact command with the code already in it.
+
+```powershell
+.\Install-TandemAgent.ps1 -PairingCode <code> -VaultUrl <your Relay Vault URL> -BundlePath .\relay-vault-edge-agent.cjs
+```
+
+It refuses to proceed unless it is elevated and finds Node.js 22+, prompts for
+the `tandem_agent` password, and tests the database connection before installing
+anything — a wrong password fails immediately rather than as an agent that will
+not start. It then stores the configuration encrypted with DPAPI at machine
+scope, registers a startup scheduled task named `TandemEdgeAgent` running as
+`SYSTEM`, and waits until the agent has actually connected before reporting
+success. If any step fails it removes the task and restores what was there
+before.
+
+Re-running it with a fresh code is the re-pair path after a connector has been
+revoked, or after the server has been rebuilt.
+
+The agent's configuration, including the database password, is protected with
+DPAPI machine scope, so it can be decrypted only on that machine. Copying the
+configuration file to another server does not carry the credentials with it.
 
 ## Security
 
