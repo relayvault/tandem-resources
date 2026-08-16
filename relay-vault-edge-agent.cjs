@@ -20262,6 +20262,21 @@ function readEnteringUser(payload) {
 function hasSyncablePatientName(firstName, lastName) {
   return typeof firstName === "string" && firstName.trim().length > 0 && typeof lastName === "string" && lastName.trim().length > 0;
 }
+function carrierPayerId(carrier) {
+  if (!carrier) return "";
+  const electId = typeof carrier?.ElectID === "string" ? carrier.ElectID.trim() : "";
+  return electId || `opendental:carrier:${String(carrier.CarrierNum)}`;
+}
+function carrierSnapshotFromRow(row) {
+  const payerId = typeof row.ElectID === "string" ? row.ElectID.trim() : "";
+  const externalId = String(row.CarrierNum);
+  const name = typeof row.CarrierName === "string" ? row.CarrierName.trim() : "";
+  return {
+    externalId,
+    name: name || `Open Dental carrier ${externalId}`,
+    ...payerId ? { payerId } : {}
+  };
+}
 function deriveClaimAppointmentExternalId(rows) {
   if (rows.length === 0 || rows.some((row) => row.claimProcNum == null || row.procNum == null)) {
     return void 0;
@@ -20551,7 +20566,7 @@ var FakeLocalApiClient = class {
       attachedCodes: [],
       appointmentExternalId: `OD-APT-${pad(i * 2 + 1)}`
     }));
-    return { patients, appointments, insurancePlans, claims };
+    return { patients, appointments, insurancePlans, claims, carriers: [] };
   }
   async fetchAppointmentSnapshot({
     from,
@@ -20960,6 +20975,10 @@ var RealLocalApiClient = class {
   }
   async fetchSyncSnapshot({ horizonDays }) {
     const pool2 = this.getPool();
+    const [sourceCarrierRows] = await pool2.query(
+      "SELECT CarrierNum, CarrierName, ElectID FROM carrier"
+    );
+    const carriers = sourceCarrierRows.map(carrierSnapshotFromRow);
     const today = /* @__PURE__ */ new Date();
     const horizon = /* @__PURE__ */ new Date();
     horizon.setUTCDate(horizon.getUTCDate() + horizonDays);
@@ -21043,7 +21062,7 @@ var RealLocalApiClient = class {
           return {
             externalId: `${sub.PlanNum}-${sub.InsSubNum}`,
             patientExternalId: String(sub.Subscriber),
-            carrierPayerId: carrier ? carrier.ElectID : "",
+            carrierPayerId: carrierPayerId(carrier),
             groupNumber: plan ? plan.GroupNum : void 0,
             subscriberId: sub.SubscriberID,
             planName: plan ? plan.GroupName || carrier?.CarrierName || void 0 : void 0,
@@ -21103,14 +21122,14 @@ var RealLocalApiClient = class {
         return {
           externalId: String(r.ClaimNum),
           patientExternalId: String(r.PatNum),
-          carrierPayerId: carrier ? carrier.ElectID : "",
+          carrierPayerId: carrierPayerId(carrier),
           statusFromSource: r.ClaimStatus,
           claimDate: r.DateService ? r.DateService.toISOString().slice(0, 10) : void 0,
           ...appointmentExternalId ? { appointmentExternalId } : {}
         };
       });
     }
-    return { patients, appointments, insurancePlans, claims };
+    return { patients, appointments, insurancePlans, claims, carriers };
   }
   async fetchAppointmentSnapshot({
     from,
