@@ -16,6 +16,7 @@ or a file in this repository.
 | `New-TandemAgentDbAccount.ps1` | Creates the least-privilege, read-only `tandem_agent` database account |
 | `Export-TandemSchema.ps1` | Read-only capture of Open Dental column definitions, for compatibility review |
 | `Install-TandemAgent.ps1` | Installs the edge agent and pairs it to a practice using a connection code |
+| `Update-TandemAgentBundle.ps1` | Replaces an installed bundle without changing its pairing |
 | `relay-vault-edge-agent.cjs` | The edge agent itself, as a single file run by Node.js |
 | `SHA256SUMS` | SHA-256 checksums for every file published here |
 
