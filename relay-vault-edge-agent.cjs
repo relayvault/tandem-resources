@@ -15213,12 +15213,12 @@ var require_query2 = __commonJS({
         this._fields.push([]);
         return this.readField;
       }
-      _streamLocalInfile(connection, path3) {
+      _streamLocalInfile(connection, path4) {
         if (this._streamFactory) {
-          this._localStream = this._streamFactory(path3);
+          this._localStream = this._streamFactory(path4);
         } else {
           this._localStreamError = new Error(
-            `As a result of LOCAL INFILE command server wants to read ${path3} file, but as of v2.0 you must provide streamFactory option returning ReadStream.`
+            `As a result of LOCAL INFILE command server wants to read ${path4} file, but as of v2.0 you must provide streamFactory option returning ReadStream.`
           );
           connection.writePacket(EmptyPacket);
           return this.infileOk;
@@ -19618,10 +19618,10 @@ var require_promise = __commonJS({
 });
 
 // src/index.ts
-var import_node_crypto5 = require("node:crypto");
-var import_promises = require("node:fs/promises");
+var import_node_crypto6 = require("node:crypto");
+var import_promises2 = require("node:fs/promises");
 var import_node_fs2 = require("node:fs");
-var import_node_path2 = __toESM(require("node:path"), 1);
+var import_node_path3 = __toESM(require("node:path"), 1);
 
 // src/opendental/local-api.ts
 var import_promise = __toESM(require_promise(), 1);
@@ -20135,6 +20135,7 @@ var ENV_KEYS = {
   registrationToken: "REGISTRATION_TOKEN",
   agentKeypairPrivate: "AGENT_KEYPAIR_PRIVATE",
   agentKeypairPublic: "AGENT_KEYPAIR_PUBLIC",
+  agentId: "AGENT_ID",
   connectorId: "AGENT_CONNECTOR_ID",
   dbHost: "OPENDENTAL_DB_HOST",
   dbPort: "OPENDENTAL_DB_PORT",
@@ -20152,6 +20153,7 @@ function resolveConfig(env, protectedConfig = {}) {
     registrationToken: value("registrationToken"),
     agentKeypairPrivate: value("agentKeypairPrivate"),
     agentKeypairPublic: value("agentKeypairPublic"),
+    agentId: value("agentId"),
     connectorId: value("connectorId"),
     dbHost: value("dbHost") ?? "localhost",
     dbPort: Number(value("dbPort") ?? 3306),
@@ -20168,6 +20170,7 @@ function mergePersistedAgentState(protectedConfig, state, clearRegistrationToken
     ...clearRegistrationToken ? { registrationToken: void 0 } : {},
     agentKeypairPrivate: state.privateKey,
     agentKeypairPublic: state.publicKey,
+    agentId: state.agentId,
     connectorId: state.connectorId ?? void 0
   };
 }
@@ -20237,6 +20240,7 @@ function safeConfigLog(config) {
     configPath: DEFAULT_CONFIG_PATH,
     hasRegistrationToken: Boolean(config.registrationToken),
     hasKeypair: Boolean(config.agentKeypairPrivate && config.agentKeypairPublic),
+    hasAgentId: Boolean(config.agentId),
     hasDatabasePassword: Boolean(config.dbPassword),
     hasConnectorId: Boolean(config.connectorId)
   };
@@ -22751,9 +22755,83 @@ function buildBenefitGrid(benefits) {
 }
 
 // src/sync.ts
+var import_node_crypto2 = require("node:crypto");
+
+// src/identity.ts
 var import_node_crypto = require("node:crypto");
+var IdentityConflictError = class extends Error {
+  constructor(agentId, connectorId) {
+    super(
+      `Stored agent identity ${agentId} is already paired to connector ${connectorId}. Refusing to generate a replacement keypair. Re-pair this agent with a fresh pairing code.`
+    );
+    this.name = "IdentityConflictError";
+  }
+};
+function agentStateFromProtectedConfig(config) {
+  if (!config.agentKeypairPrivate || !config.agentKeypairPublic) {
+    throw new IdentityConflictError(
+      config.agentId ?? "unknown",
+      config.connectorId ?? "unknown"
+    );
+  }
+  if (!config.agentId) {
+    return {
+      agentId: `agent_${(0, import_node_crypto.randomBytes)(12).toString("hex")}`,
+      privateKey: config.agentKeypairPrivate,
+      publicKey: config.agentKeypairPublic,
+      connectorId: config.connectorId ?? null
+    };
+  }
+  return {
+    agentId: config.agentId,
+    privateKey: config.agentKeypairPrivate,
+    publicKey: config.agentKeypairPublic,
+    connectorId: config.connectorId ?? null
+  };
+}
+function createFreshAgentState(existingState = {}, registrationToken) {
+  if (existingState.connectorId && !registrationToken) {
+    throw new IdentityConflictError(
+      existingState.agentId ?? "unknown",
+      existingState.connectorId
+    );
+  }
+  const { privateKey, publicKey } = (0, import_node_crypto.generateKeyPairSync)("ed25519");
+  const exportedPrivateKey = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const exportedPublicKey = publicKey.export({ type: "spki", format: "pem" }).toString();
+  return {
+    agentId: `agent_${(0, import_node_crypto.randomBytes)(12).toString("hex")}`,
+    privateKey: exportedPrivateKey,
+    publicKey: exportedPublicKey,
+    connectorId: null
+  };
+}
+function agentIdFromPublicKey(publicKey) {
+  return `agent_${(0, import_node_crypto.createHash)("sha256").update(publicKey).digest("hex").slice(0, 24)}`;
+}
+function normalizePublicKey(publicKey) {
+  return publicKey.replace(/\r\n?/g, "\n").trim();
+}
+function publicKeyFingerprint(publicKey) {
+  return (0, import_node_crypto.createHash)("sha256").update(normalizePublicKey(publicKey), "utf8").digest("hex");
+}
+function isUnknownAgentError(error) {
+  return error instanceof Error && error.name === "UnknownAgentError";
+}
+function unknownAgentError(status, responseText, identity = {}) {
+  if (status !== 401 || !/unknown agent/i.test(responseText)) return void 0;
+  const error = new Error(`Server rejected this agent identity: ${status} ${responseText}`);
+  error.name = "UnknownAgentError";
+  Object.assign(error, {
+    agentId: identity.agentId,
+    connectorId: identity.connectorId ?? null
+  });
+  return error;
+}
+
+// src/sync.ts
 function canonicalString(method, urlPath, timestampMs, body) {
-  const bodyHash = (0, import_node_crypto.createHash)("sha256").update(body).digest("hex");
+  const bodyHash = (0, import_node_crypto2.createHash)("sha256").update(body).digest("hex");
   return `${method.toUpperCase()}
 ${urlPath}
 ${timestampMs}
@@ -22765,7 +22843,7 @@ function signRequest(privateKey, method, urlPath, body) {
     canonicalString(method, urlPath, timestamp, body),
     "utf8"
   );
-  const sig = (0, import_node_crypto.sign)(null, message, privateKey).toString("base64");
+  const sig = (0, import_node_crypto2.sign)(null, message, privateKey).toString("base64");
   return { timestamp, signature: sig };
 }
 async function runSync(deps) {
@@ -22799,6 +22877,7 @@ async function runSync(deps) {
       headers: {
         "content-type": "application/json",
         "x-agent-id": deps.agentId,
+        "x-agent-public-key-fingerprint": publicKeyFingerprint(deps.publicKey),
         "x-agent-timestamp": timestamp,
         "x-agent-signature": signature
       },
@@ -22812,6 +22891,8 @@ async function runSync(deps) {
   }
   if (!res.ok) {
     const text = await res.text();
+    const identityError = unknownAgentError(res.status, text, deps);
+    if (identityError) throw identityError;
     deps.logError("Sync POST rejected", { status: res.status, text });
     return;
   }
@@ -22829,14 +22910,14 @@ async function runSync(deps) {
 }
 
 // src/dispatch.ts
-var import_node_crypto2 = require("node:crypto");
+var import_node_crypto3 = require("node:crypto");
 var DEFAULT_POLL_WAIT_MS = 25e3;
 var POLL_ERROR_BACKOFF_MS = 5e3;
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 function canonicalString2(method, urlPath, timestampMs, body) {
-  const bodyHash = (0, import_node_crypto2.createHash)("sha256").update(body).digest("hex");
+  const bodyHash = (0, import_node_crypto3.createHash)("sha256").update(body).digest("hex");
   return `${method.toUpperCase()}
 ${urlPath}
 ${timestampMs}
@@ -22848,7 +22929,7 @@ function signRequest2(privateKey, method, urlPath, body) {
     canonicalString2(method, urlPath, timestamp, body),
     "utf8"
   );
-  const sig = (0, import_node_crypto2.sign)(null, message, privateKey).toString("base64");
+  const sig = (0, import_node_crypto3.sign)(null, message, privateKey).toString("base64");
   return { timestamp, signature: sig };
 }
 async function signedPost(deps, urlPath, body) {
@@ -22864,6 +22945,7 @@ async function signedPost(deps, urlPath, body) {
     headers: {
       "content-type": "application/json",
       "x-agent-id": deps.agentId,
+      "x-agent-public-key-fingerprint": publicKeyFingerprint(deps.publicKey),
       "x-agent-timestamp": timestamp,
       "x-agent-signature": signature
     },
@@ -22877,6 +22959,8 @@ async function pollOnce(deps) {
   if (res.status === 204) return null;
   if (!res.ok) {
     const text = await res.text();
+    const identityError = unknownAgentError(res.status, text, deps);
+    if (identityError) throw identityError;
     throw new Error(`poll rejected: ${res.status} ${text}`);
   }
   const json = await res.json();
@@ -22932,6 +23016,8 @@ async function postResult(deps, job, result) {
   });
   if (!res.ok) {
     const text = await res.text();
+    const identityError = unknownAgentError(res.status, text, deps);
+    if (identityError) throw identityError;
     throw new Error(`result rejected: ${res.status} ${text}`);
   }
 }
@@ -22941,6 +23027,14 @@ async function runDispatchLoop(deps) {
     try {
       job = await pollOnce(deps);
     } catch (err) {
+      if (isUnknownAgentError(err)) {
+        deps.logError("Fatal agent identity rejection; dispatch loop stopped", {
+          err: err.message,
+          agentId: deps.agentId,
+          connectorId: deps.connectorId ?? null
+        });
+        return;
+      }
       deps.logError("Dispatch poll failed", {
         err: err instanceof Error ? err.message : String(err)
       });
@@ -22973,6 +23067,14 @@ async function runDispatchLoop(deps) {
         writeStatus: result.status
       });
     } catch (err) {
+      if (isUnknownAgentError(err)) {
+        deps.logError("Fatal agent identity rejection; dispatch loop stopped", {
+          err: err.message,
+          agentId: deps.agentId,
+          connectorId: deps.connectorId ?? null
+        });
+        return;
+      }
       deps.logError("Dispatch result post failed; lease will expire", {
         reviewItemId: job.reviewItemId,
         operationId: job.operationId,
@@ -22984,7 +23086,7 @@ async function runDispatchLoop(deps) {
 }
 
 // src/read-jobs.ts
-var import_node_crypto3 = require("node:crypto");
+var import_node_crypto4 = require("node:crypto");
 
 // src/adapters/opendental.ts
 var import_promise2 = __toESM(require_promise(), 1);
@@ -23467,8 +23569,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path3, errorMaps, issueData } = params;
-  const fullPath = [...path3, ...issueData.path || []];
+  const { data, path: path4, errorMaps, issueData } = params;
+  const fullPath = [...path4, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -23584,11 +23686,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path3, key) {
+  constructor(parent, value, path4, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path3;
+    this._path = path4;
     this._key = key;
   }
   get path() {
@@ -27318,7 +27420,7 @@ function sleep2(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 function canonicalString3(method, urlPath, timestampMs, body) {
-  const bodyHash = (0, import_node_crypto3.createHash)("sha256").update(body).digest("hex");
+  const bodyHash = (0, import_node_crypto4.createHash)("sha256").update(body).digest("hex");
   return `${method.toUpperCase()}
 ${urlPath}
 ${timestampMs}
@@ -27330,7 +27432,7 @@ function signRequest3(privateKey, method, urlPath, body) {
     canonicalString3(method, urlPath, timestamp, body),
     "utf8"
   );
-  const sig = (0, import_node_crypto3.sign)(null, message, privateKey).toString("base64");
+  const sig = (0, import_node_crypto4.sign)(null, message, privateKey).toString("base64");
   return { timestamp, signature: sig };
 }
 async function signedPost2(deps, urlPath, body) {
@@ -27346,6 +27448,7 @@ async function signedPost2(deps, urlPath, body) {
     headers: {
       "content-type": "application/json",
       "x-agent-id": deps.agentId,
+      "x-agent-public-key-fingerprint": publicKeyFingerprint(deps.publicKey),
       "x-agent-timestamp": timestamp,
       "x-agent-signature": signature
     },
@@ -27359,6 +27462,8 @@ async function pollOnce2(deps) {
   if (res.status === 204) return null;
   if (!res.ok) {
     const text = await res.text();
+    const identityError = unknownAgentError(res.status, text, deps);
+    if (identityError) throw identityError;
     throw new Error(`read-job poll rejected: ${res.status} ${text}`);
   }
   const json = await res.json();
@@ -27417,6 +27522,8 @@ async function postResult2(deps, job, result) {
   });
   if (!res.ok) {
     const text = await res.text();
+    const identityError = unknownAgentError(res.status, text, deps);
+    if (identityError) throw identityError;
     throw new Error(`read-job result rejected: ${res.status} ${text}`);
   }
 }
@@ -27426,6 +27533,14 @@ async function runReadJobsLoop(deps) {
     try {
       job = await pollOnce2(deps);
     } catch (err) {
+      if (isUnknownAgentError(err)) {
+        deps.logError("Fatal agent identity rejection; read-job loop stopped", {
+          err: err.message,
+          agentId: deps.agentId,
+          connectorId: deps.connectorId ?? null
+        });
+        return;
+      }
       deps.logError("Read-job poll failed", {
         err: err instanceof Error ? err.message : String(err)
       });
@@ -27457,6 +27572,14 @@ async function runReadJobsLoop(deps) {
         readStatus: result.status
       });
     } catch (err) {
+      if (isUnknownAgentError(err)) {
+        deps.logError("Fatal agent identity rejection; read-job loop stopped", {
+          err: err.message,
+          agentId: deps.agentId,
+          connectorId: deps.connectorId ?? null
+        });
+        return;
+      }
       deps.logError("Read-job result post failed; lease will expire", {
         jobId: job.jobId,
         operationId: job.operationId,
@@ -27468,12 +27591,12 @@ async function runReadJobsLoop(deps) {
 }
 
 // src/run-client.ts
-var import_node_crypto4 = require("node:crypto");
+var import_node_crypto5 = require("node:crypto");
 var RELAY_VAULT_URL = getAgentConfigSync().vaultUrl;
 var MAX_RETRIES = 3;
 var INITIAL_BACKOFF_MS = 500;
 function canonicalString4(method, urlPath, timestampMs, body) {
-  const bodyHash = (0, import_node_crypto4.createHash)("sha256").update(body).digest("hex");
+  const bodyHash = (0, import_node_crypto5.createHash)("sha256").update(body).digest("hex");
   return `${method.toUpperCase()}
 ${urlPath}
 ${timestampMs}
@@ -27482,7 +27605,7 @@ ${bodyHash}`;
 function signRequest4(state, method, urlPath, body) {
   const timestamp = String(Date.now());
   const message = Buffer.from(canonicalString4(method, urlPath, timestamp, body), "utf8");
-  const sig = (0, import_node_crypto4.sign)(null, message, state.privateKey).toString("base64");
+  const sig = (0, import_node_crypto5.sign)(null, message, state.privateKey).toString("base64");
   return { timestamp, signature: sig };
 }
 async function vaultFetch(state, method, urlPath, body) {
@@ -27495,6 +27618,7 @@ async function vaultFetch(state, method, urlPath, body) {
         headers: {
           "content-type": "application/json",
           "x-agent-id": state.agentId,
+          "x-agent-public-key-fingerprint": publicKeyFingerprint(state.publicKey),
           "x-agent-timestamp": timestamp,
           "x-agent-signature": signature
         },
@@ -27502,11 +27626,14 @@ async function vaultFetch(state, method, urlPath, body) {
       });
       if (!res.ok) {
         const text = await res.text();
+        const identityError = unknownAgentError(res.status, text, state);
+        if (identityError) throw identityError;
         throw new Error(`${method} ${urlPath} failed: ${res.status} ${text}`);
       }
       return await res.json();
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
+      if (isUnknownAgentError(lastError)) throw lastError;
       if (attempt < MAX_RETRIES - 1) {
         const backoff = INITIAL_BACKOFF_MS * Math.pow(2, attempt);
         await new Promise((r) => setTimeout(r, backoff));
@@ -27545,6 +27672,7 @@ async function pollForWork(state) {
     headers: {
       "content-type": "application/json",
       "x-agent-id": state.agentId,
+      "x-agent-public-key-fingerprint": publicKeyFingerprint(state.publicKey),
       "x-agent-timestamp": timestamp,
       "x-agent-signature": signature
     },
@@ -27553,6 +27681,8 @@ async function pollForWork(state) {
   if (res.status === 204) return { workItem: null };
   if (!res.ok) {
     const text = await res.text();
+    const identityError = unknownAgentError(res.status, text, state);
+    if (identityError) throw identityError;
     throw new Error(`work/poll failed: ${res.status} ${text}`);
   }
   const json = await res.json();
@@ -27728,6 +27858,14 @@ async function runWorkPoller(state, deps) {
         });
       }
     } catch (err) {
+      if (isUnknownAgentError(err)) {
+        deps.logError("Fatal agent identity rejection; work poller stopped", {
+          err: err.message,
+          agentId: state.agentId,
+          connectorId: state.connectorId
+        });
+        return;
+      }
       deps.logError("Work poll failed", {
         err: err instanceof Error ? err.message : String(err)
       });
@@ -27737,10 +27875,68 @@ async function runWorkPoller(state, deps) {
   }
 }
 
+// src/logger.ts
+var import_promises = require("node:fs/promises");
+var import_node_os2 = __toESM(require("node:os"), 1);
+var import_node_path2 = __toESM(require("node:path"), 1);
+function resolveAgentLogPath() {
+  if (process.env.AGENT_LOG_PATH) return process.env.AGENT_LOG_PATH;
+  if (process.platform === "win32") {
+    return import_node_path2.default.join(
+      process.env.ProgramData ?? "C:\\ProgramData",
+      "Tandem",
+      "agent.log"
+    );
+  }
+  return import_node_path2.default.resolve(process.cwd(), "agent.log");
+}
+function createAgentLogger(options = {}) {
+  const logPath = options.logPath ?? resolveAgentLogPath();
+  const maxBytes = options.maxBytes ?? 5 * 1024 * 1024;
+  const maxFiles = options.maxFiles ?? 3;
+  const writeFile2 = options.writeFile ?? ((filePath, data) => (0, import_promises.appendFile)(filePath, data));
+  let pending = Promise.resolve();
+  const enqueueFileWrite = (line) => {
+    pending = pending.then(async () => {
+      try {
+        await (0, import_promises.mkdir)(import_node_path2.default.dirname(logPath), { recursive: true });
+        const currentSize = await (0, import_promises.stat)(logPath).then((result) => result.size).catch(() => 0);
+        if (currentSize + Buffer.byteLength(line) > maxBytes) {
+          for (let index = maxFiles - 1; index >= 1; index -= 1) {
+            const source = `${logPath}.${index}`;
+            const destination = `${logPath}.${index + 1}`;
+            await (0, import_promises.rename)(source, destination).catch(() => void 0);
+          }
+          await (0, import_promises.rename)(logPath, `${logPath}.1`).catch(() => void 0);
+        }
+        await writeFile2(logPath, line);
+      } catch {
+      }
+    }).catch(() => void 0);
+  };
+  const write = (level, msg, extra) => {
+    const record = {
+      level,
+      time: (/* @__PURE__ */ new Date()).toISOString(),
+      msg,
+      ...extra
+    };
+    const line = `${JSON.stringify(record)}${import_node_os2.default.EOL}`;
+    if (level === "error") console.error(line.trimEnd());
+    else console.log(line.trimEnd());
+    enqueueFileWrite(line);
+  };
+  return {
+    logInfo: (msg, extra = {}) => write("info", msg, extra),
+    logError: (msg, extra = {}) => write("error", msg, extra),
+    flush: () => pending
+  };
+}
+
 // src/index.ts
 var CONFIG = getAgentConfigSync();
 var RELAY_VAULT_URL2 = CONFIG.vaultUrl;
-var STATE_PATH = import_node_path2.default.resolve(process.cwd(), "agent-state.json");
+var STATE_PATH = import_node_path3.default.resolve(process.cwd(), "agent-state.json");
 var AGENT_VERSION = "0.0.1";
 var HEARTBEAT_INTERVAL_MS = 60 * 1e3;
 var SYNC_INTERVAL_MS = 60 * 60 * 1e3;
@@ -27754,57 +27950,87 @@ function buildLocalApiClient() {
   if (OPENDENTAL_MODE === "real") return new RealLocalApiClient();
   throw new Error(`Unknown OPENDENTAL_MODE: ${OPENDENTAL_MODE}`);
 }
-function logInfo(msg, extra = {}) {
-  console.log(JSON.stringify({ level: "info", time: (/* @__PURE__ */ new Date()).toISOString(), msg, ...extra }));
-}
-function logError(msg, extra = {}) {
-  console.error(JSON.stringify({ level: "error", time: (/* @__PURE__ */ new Date()).toISOString(), msg, ...extra }));
-}
+var { logInfo, logError } = createAgentLogger();
 async function loadOrCreateState() {
   const envPrivate = CONFIG.agentKeypairPrivate;
   const envPublic = CONFIG.agentKeypairPublic;
   if (envPrivate && envPublic) {
     let connectorId = CONFIG.connectorId ?? null;
     if (!connectorId && (0, import_node_fs2.existsSync)(STATE_PATH)) {
-      const raw = await (0, import_promises.readFile)(STATE_PATH, "utf8");
+      const raw = await (0, import_promises2.readFile)(STATE_PATH, "utf8");
       const saved = JSON.parse(raw);
       connectorId = saved.connectorId;
+    }
+    if (CONFIG.registrationToken) {
+      return createFreshAgentState(
+        {
+          agentId: agentIdFromPublicKey(envPublic),
+          privateKey: envPrivate,
+          publicKey: envPublic,
+          connectorId
+        },
+        CONFIG.registrationToken
+      );
     }
     logInfo("Loaded agent keypair", {
       hasConnectorId: connectorId !== null
     });
     return {
-      agentId: `agent_${(0, import_node_crypto5.createHash)("sha256").update(envPublic).digest("hex").slice(0, 24)}`,
+      agentId: agentIdFromPublicKey(envPublic),
       privateKey: envPrivate,
       publicKey: envPublic,
       connectorId
     };
   }
   if ((0, import_node_fs2.existsSync)(STATE_PATH)) {
-    const raw = await (0, import_promises.readFile)(STATE_PATH, "utf8");
+    const raw = await (0, import_promises2.readFile)(STATE_PATH, "utf8");
     const saved = JSON.parse(raw);
+    if (CONFIG.registrationToken) {
+      const state2 = createFreshAgentState(saved, CONFIG.registrationToken);
+      if (process.platform === "win32") {
+        writeProtectedConfigSync(
+          mergePersistedAgentState(readProtectedConfigSync(), state2)
+        );
+        await (0, import_promises2.unlink)(STATE_PATH);
+      }
+      return state2;
+    }
     if (process.platform === "win32") {
       writeProtectedConfigSync(
         mergePersistedAgentState(readProtectedConfigSync(), saved)
       );
-      await (0, import_promises.unlink)(STATE_PATH);
+      await (0, import_promises2.unlink)(STATE_PATH);
     }
     return saved;
   }
-  const { privateKey, publicKey } = (0, import_node_crypto5.generateKeyPairSync)("ed25519");
-  const state = {
-    agentId: `agent_${(0, import_node_crypto5.randomBytes)(12).toString("hex")}`,
-    privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
-    publicKey: publicKey.export({ type: "spki", format: "pem" }).toString(),
-    connectorId: null
-  };
+  const protectedConfig = readProtectedConfigSync();
+  if (protectedConfig.agentKeypairPrivate && protectedConfig.agentKeypairPublic && !CONFIG.registrationToken) {
+    const state2 = agentStateFromProtectedConfig(protectedConfig);
+    if (!protectedConfig.agentId && process.platform === "win32") {
+      writeProtectedConfigSync(mergePersistedAgentState(protectedConfig, state2));
+    }
+    logInfo("Loaded protected agent keypair", {
+      agentId: state2.agentId,
+      hasConnectorId: state2.connectorId !== null
+    });
+    return state2;
+  }
+  const state = createFreshAgentState(
+    {
+      connectorId: protectedConfig.connectorId ?? null,
+      agentId: protectedConfig.agentId ?? "unknown",
+      privateKey: protectedConfig.agentKeypairPrivate,
+      publicKey: protectedConfig.agentKeypairPublic
+    },
+    CONFIG.registrationToken
+  );
   if (process.platform === "win32") {
     writeProtectedConfigSync(
-      mergePersistedAgentState(readProtectedConfigSync(), state)
+      mergePersistedAgentState(protectedConfig, state)
     );
     logInfo("Generated new agent keypair", { agentId: state.agentId });
   } else {
-    await (0, import_promises.writeFile)(STATE_PATH, JSON.stringify(state, null, 2), { mode: 384 });
+    await (0, import_promises2.writeFile)(STATE_PATH, JSON.stringify(state, null, 2), { mode: 384 });
     logInfo("Generated new agent keypair", { agentId: state.agentId, statePath: STATE_PATH });
   }
   return state;
@@ -27816,7 +28042,7 @@ async function saveState(state) {
     );
     return;
   }
-  await (0, import_promises.writeFile)(STATE_PATH, JSON.stringify(state, null, 2), { mode: 384 });
+  await (0, import_promises2.writeFile)(STATE_PATH, JSON.stringify(state, null, 2), { mode: 384 });
 }
 async function registerWithServer(state, token) {
   const url = `${RELAY_VAULT_URL2}/api/connectors/register`;
@@ -27839,7 +28065,7 @@ async function registerWithServer(state, token) {
   return json.connectorId;
 }
 function canonicalString5(method, urlPath, timestampMs, body) {
-  const bodyHash = (0, import_node_crypto5.createHash)("sha256").update(body).digest("hex");
+  const bodyHash = (0, import_node_crypto6.createHash)("sha256").update(body).digest("hex");
   return `${method.toUpperCase()}
 ${urlPath}
 ${timestampMs}
@@ -27848,7 +28074,7 @@ ${bodyHash}`;
 function signRequest5(state, method, urlPath, body) {
   const timestamp = String(Date.now());
   const message = Buffer.from(canonicalString5(method, urlPath, timestamp, body), "utf8");
-  const sig = (0, import_node_crypto5.sign)(null, message, state.privateKey).toString("base64");
+  const sig = (0, import_node_crypto6.sign)(null, message, state.privateKey).toString("base64");
   return { timestamp, signature: sig };
 }
 async function sendHeartbeat(state, localApi) {
@@ -27873,6 +28099,7 @@ async function sendHeartbeat(state, localApi) {
     headers: {
       "content-type": "application/json",
       "x-agent-id": state.agentId,
+      "x-agent-public-key-fingerprint": publicKeyFingerprint(state.publicKey),
       "x-agent-timestamp": timestamp,
       "x-agent-signature": signature
     },
@@ -27880,6 +28107,8 @@ async function sendHeartbeat(state, localApi) {
   });
   if (!res.ok) {
     const text = await res.text();
+    const identityError = unknownAgentError(res.status, text, state);
+    if (identityError) throw identityError;
     throw new Error(`heartbeat failed: ${res.status} ${text}`);
   }
   const json = await res.json();
@@ -27917,6 +28146,13 @@ AGENT_CONNECTOR_ID=${JSON.stringify(connectorId)}
     try {
       await sendHeartbeat(state, localApi);
     } catch (err) {
+      if (isUnknownAgentError(err)) {
+        logError("Fatal agent identity rejection; stopping agent", {
+          agentId: state.agentId,
+          connectorId: state.connectorId
+        });
+        process.exit(1);
+      }
       logError("Heartbeat error", { err: err instanceof Error ? err.message : String(err) });
     }
   };
@@ -27927,6 +28163,8 @@ AGENT_CONNECTOR_ID=${JSON.stringify(connectorId)}
       serverUrl: RELAY_VAULT_URL2,
       agentId: state.agentId,
       privateKey: state.privateKey,
+      publicKey: state.publicKey,
+      connectorId: state.connectorId,
       localApi,
       horizonDays: SYNC_HORIZON_DAYS,
       logInfo,
@@ -27946,6 +28184,7 @@ AGENT_CONNECTOR_ID=${JSON.stringify(connectorId)}
       await runWF01(runState);
       logInfo("WF-01 completed successfully");
     } catch (err) {
+      if (isUnknownAgentError(err)) throw err;
       logError("WF-01 failed", { err: err instanceof Error ? err.message : String(err) });
     }
   }
@@ -27953,6 +28192,8 @@ AGENT_CONNECTOR_ID=${JSON.stringify(connectorId)}
     serverUrl: RELAY_VAULT_URL2,
     agentId: state.agentId,
     privateKey: state.privateKey,
+    publicKey: state.publicKey,
+    connectorId: state.connectorId,
     localApi,
     logInfo,
     logError
@@ -27961,6 +28202,8 @@ AGENT_CONNECTOR_ID=${JSON.stringify(connectorId)}
     serverUrl: RELAY_VAULT_URL2,
     agentId: state.agentId,
     privateKey: state.privateKey,
+    publicKey: state.publicKey,
+    connectorId: state.connectorId,
     localApi,
     logInfo,
     logError
@@ -27968,6 +28211,12 @@ AGENT_CONNECTOR_ID=${JSON.stringify(connectorId)}
   void runWorkPoller(runState, { logInfo, logError });
 }
 main().catch((err) => {
+  if (isUnknownAgentError(err)) {
+    logError("Fatal agent identity rejection; agent stopped", {
+      agentId: err.agentId ?? "unknown",
+      connectorId: err.connectorId ?? CONFIG.connectorId ?? null
+    });
+  }
   logError("Fatal", { err: err instanceof Error ? err.message : String(err) });
   process.exit(1);
 });
