@@ -21140,6 +21140,48 @@ function patientInsertPairs(values, marker2) {
   ];
   return pairs;
 }
+function patientSnapshotFromRow(row, customFields) {
+  return {
+    externalId: String(row.PatNum),
+    firstName: String(row.FName).trim(),
+    lastName: String(row.LName).trim(),
+    patStatus: Number(row.PatStatus),
+    middleInitial: String(row.MiddleI ?? "").trim() || void 0,
+    preferredName: String(row.Preferred ?? "").trim() || void 0,
+    salutation: String(row.Salutation ?? "").trim() || void 0,
+    position: Number(row.Position),
+    maritalStatus: String(row.MaritalStatus ?? "").trim() || void 0,
+    gender: Number(row.Gender),
+    address: String(row.Address ?? "").trim() || void 0,
+    address2: String(row.Address2 ?? "").trim() || void 0,
+    city: String(row.City ?? "").trim() || void 0,
+    state: String(row.State ?? "").trim() || void 0,
+    zip: String(row.Zip ?? "").trim() || void 0,
+    homePhone: String(row.HmPhone ?? "").trim() || void 0,
+    workPhone: String(row.WkPhone ?? "").trim() || void 0,
+    wirelessPhone: String(row.WirelessPhone ?? "").trim() || void 0,
+    email: String(row.Email ?? "").trim() || void 0,
+    contactMethod: String(row.PreferContactMethod ?? "").trim() || void 0,
+    emailOk: void 0,
+    billingType: Number(row.BillingType),
+    creditType: String(row.CreditType ?? "").trim() || void 0,
+    primaryProviderExternalId: row.PriProv ? String(row.PriProv) : void 0,
+    secondaryProviderExternalId: row.SecProv ? String(row.SecProv) : void 0,
+    language: String(row.Language ?? "").trim() || void 0,
+    patientRestrictions: [row.FamFinUrgNote, row.MedUrgNote, row.ApptModNote].filter((value) => typeof value === "string" && value.trim().length > 0).join("\n") || void 0,
+    addressPhoneNote: String(row.AddrNote ?? "").trim() || void 0,
+    guarantorExternalId: row.Guarantor ? String(row.Guarantor) : void 0,
+    customFields,
+    dob: row.Birthdate && row.Birthdate.getFullYear() > 1 ? row.Birthdate.toISOString().slice(0, 10) : void 0,
+    estBalance: Number(row.EstBalance),
+    bal0_30: Number(row.Bal_0_30),
+    bal31_60: Number(row.Bal_31_60),
+    bal61_90: Number(row.Bal_61_90),
+    balOver90: Number(row.BalOver90),
+    balTotal: Number(row.BalTotal),
+    insEst: Number(row.InsEst)
+  };
+}
 var RealLocalApiClient = class {
   pool;
   constructor(pool2) {
@@ -21174,6 +21216,17 @@ var RealLocalApiClient = class {
       "SELECT CarrierNum, CarrierName, ElectID FROM carrier"
     );
     const carriers = sourceCarrierRows.map(carrierSnapshotFromRow);
+    const [providerRows] = await pool2.query("SELECT * FROM provider");
+    const providerMap = new Map(
+      providerRows.map((row) => [
+        String(row.ProvNum),
+        [row.FName, row.LName].filter(Boolean).join(" ").trim() || String(row.ProvNum)
+      ])
+    );
+    const [appointmentTypeRows] = await pool2.query("SELECT * FROM appointmenttype");
+    const appointmentTypeMap = new Map(
+      appointmentTypeRows.map((row) => [String(row.AppointmentTypeNum), String(row.AppointmentTypeName)])
+    );
     const today = /* @__PURE__ */ new Date();
     const horizon = /* @__PURE__ */ new Date();
     horizon.setUTCDate(horizon.getUTCDate() + horizonDays);
@@ -21183,14 +21236,78 @@ var RealLocalApiClient = class {
       `SELECT * FROM appointment WHERE DATE(AptDateTime) BETWEEN ? AND ?`,
       [todayYmd, horizonYmd]
     );
+    const [appointmentFieldRows] = await pool2.query(
+      "SELECT * FROM apptfield"
+    );
+    const appointmentFields = /* @__PURE__ */ new Map();
+    for (const row of appointmentFieldRows) {
+      const fields = appointmentFields.get(String(row.AptNum)) ?? {};
+      fields[String(row.FieldName)] = row.FieldValue;
+      appointmentFields.set(String(row.AptNum), fields);
+    }
+    const aptNums = aptRows.map((row) => Number(row.AptNum));
+    const [procedureRows] = aptNums.length > 0 ? await pool2.query(
+      `SELECT pl.*, pc.ProcCode, pc.Descript
+             FROM procedurelog pl
+             LEFT JOIN procedurecode pc ON pc.CodeNum = pl.CodeNum
+            WHERE pl.AptNum IN (?) ORDER BY pl.AptNum, pl.ProcNum`,
+      [aptNums]
+    ) : [[]];
+    const procedureCodesByApt = /* @__PURE__ */ new Map();
+    const appointmentProcedures = procedureRows.map((row, sequence) => {
+      const appointmentExternalId = String(row.AptNum);
+      const code = typeof row.ProcCode === "string" ? row.ProcCode.trim() : void 0;
+      if (code) {
+        const codes = procedureCodesByApt.get(appointmentExternalId) ?? [];
+        codes.push(code);
+        procedureCodesByApt.set(appointmentExternalId, codes);
+      }
+      return {
+        externalId: String(row.ProcNum),
+        appointmentExternalId,
+        patientExternalId: String(row.PatNum),
+        code,
+        description: typeof row.Descript === "string" ? row.Descript : void 0,
+        fee: row.ProcFee === null || row.ProcFee === void 0 ? void 0 : Number(row.ProcFee),
+        status: row.ProcStatus === null || row.ProcStatus === void 0 ? void 0 : Number(row.ProcStatus),
+        priority: row.Priority === null || row.Priority === void 0 ? void 0 : Number(row.Priority),
+        tooth: typeof row.ToothNum === "string" ? row.ToothNum : void 0,
+        surface: typeof row.Surf === "string" ? row.Surf : void 0,
+        sequence
+      };
+    });
+    const dateTime = (value) => value instanceof Date && !Number.isNaN(value.getTime()) && value.getFullYear() > 1901 ? value.toISOString() : void 0;
     const appointments = aptRows.map((r) => ({
       externalId: String(r.AptNum),
       patientExternalId: String(r.PatNum),
       scheduledAt: r.AptDateTime.toISOString(),
       provider: r.ProvNum ? String(r.ProvNum) : void 0,
+      providerName: r.ProvNum ? providerMap.get(String(r.ProvNum)) : void 0,
+      hygienist: r.ProvHyg ? String(r.ProvHyg) : void 0,
+      hygienistName: r.ProvHyg ? providerMap.get(String(r.ProvHyg)) : void 0,
+      assistant: r.Assistant ? String(r.Assistant) : void 0,
+      assistantName: r.Assistant ? providerMap.get(String(r.Assistant)) : void 0,
       operatory: r.Op ? Number(r.Op) : void 0,
-      procedureCodes: r.ProcDescript ? r.ProcDescript.split(",").map((s) => s.trim()).filter(Boolean) : void 0,
-      statusFromSource: aptStatusLabel(r.AptStatus)
+      procedureCodes: procedureCodesByApt.get(String(r.AptNum)) ?? (r.ProcDescript ? r.ProcDescript.split(",").map((s) => s.trim()).filter(Boolean) : void 0),
+      statusFromSource: aptStatusLabel(r.AptStatus),
+      statusCode: Number(r.AptStatus),
+      asap: Number(r.AptStatus) === 4,
+      unscheduledStatus: Number(r.UnschedStatus),
+      confirmedStatus: Number(r.Confirmed),
+      isNewPatient: Boolean(r.IsNewPatient),
+      isHygiene: Boolean(r.IsHygiene),
+      timeLocked: Boolean(r.TimeLocked),
+      appointmentType: Number(r.AppointmentTypeNum),
+      appointmentTypeName: r.AppointmentTypeNum ? appointmentTypeMap.get(String(r.AppointmentTypeNum)) : void 0,
+      color: r.ColorOverride !== void 0 && r.ColorOverride !== null ? String(r.ColorOverride) : void 0,
+      arrivedAt: dateTime(r.DateTimeArrived),
+      seatedAt: dateTime(r.DateTimeSeated),
+      dismissedAt: dateTime(r.DateTimeDismissed),
+      askedToArriveAt: dateTime(r.DateTimeAskedToArrive),
+      note: typeof r.Note === "string" ? r.Note : void 0,
+      insurancePlan1ExternalId: r.InsPlan1 ? String(r.InsPlan1) : void 0,
+      insurancePlan2ExternalId: r.InsPlan2 ? String(r.InsPlan2) : void 0,
+      customFields: appointmentFields.get(String(r.AptNum))
     }));
     const patNums = [...new Set(aptRows.map((r) => r.PatNum))];
     let patients = [];
@@ -21198,21 +21315,16 @@ var RealLocalApiClient = class {
       const [patRows] = await pool2.query(
         "SELECT * FROM patient"
       );
-      patients = patRows.filter(
-        (r) => hasSyncablePatientName(r.FName, r.LName)
-      ).map((r) => ({
-        externalId: String(r.PatNum),
-        firstName: String(r.FName).trim(),
-        lastName: String(r.LName).trim(),
-        dob: r.Birthdate && r.Birthdate.getFullYear() > 1 ? r.Birthdate.toISOString().slice(0, 10) : void 0,
-        estBalance: Number(r.EstBalance),
-        bal0_30: Number(r.Bal_0_30),
-        bal31_60: Number(r.Bal_31_60),
-        bal61_90: Number(r.Bal_61_90),
-        balOver90: Number(r.BalOver90),
-        balTotal: Number(r.BalTotal),
-        insEst: Number(r.InsEst)
-      }));
+      const [patientFieldRows] = await pool2.query(
+        "SELECT * FROM patfield"
+      );
+      const patientFields = /* @__PURE__ */ new Map();
+      for (const row of patientFieldRows) {
+        const fields = patientFields.get(String(row.PatNum)) ?? {};
+        fields[String(row.FieldName)] = row.FieldValue;
+        patientFields.set(String(row.PatNum), fields);
+      }
+      patients = patRows.filter((r) => hasSyncablePatientName(r.FName, r.LName)).map((r) => patientSnapshotFromRow(r, patientFields.get(String(r.PatNum))));
     }
     let insurancePlans = [];
     if (patNums.length > 0) {
@@ -21241,6 +21353,30 @@ var RealLocalApiClient = class {
           `SELECT * FROM benefit WHERE PlanNum IN (?)`,
           [planNums]
         );
+        const insSubNums = [...new Set(subRows.map((row) => Number(row.InsSubNum)).filter((value) => value > 0))];
+        const [patPlanRows] = insSubNums.length > 0 ? await pool2.query(
+          `SELECT * FROM patplan WHERE InsSubNum IN (?)`,
+          [insSubNums]
+        ) : [[]];
+        const patPlanMap = new Map(patPlanRows.map((row) => [Number(row.InsSubNum), row]));
+        const employerNums = [...new Set(planRows.map((row) => Number(row.EmployerNum)).filter((value) => value > 0))];
+        const [employerRows] = employerNums.length > 0 ? await pool2.query(
+          `SELECT * FROM employer WHERE EmployerNum IN (?)`,
+          [employerNums]
+        ) : [[]];
+        const employerMap = new Map(employerRows.map((row) => [Number(row.EmployerNum), row]));
+        const feeScheduleNums = [...new Set(planRows.map((row) => Number(row.FeeSched)).filter((value) => value > 0))];
+        const [feeScheduleRows] = feeScheduleNums.length > 0 ? await pool2.query(
+          `SELECT * FROM feesched WHERE FeeSchedNum IN (?)`,
+          [feeScheduleNums]
+        ) : [[]];
+        const feeScheduleMap = new Map(feeScheduleRows.map((row) => [Number(row.FeeSchedNum), row]));
+        const covCatNums = [...new Set(benefitRows.map((row) => Number(row.CovCatNum)))];
+        const [covCatRows] = covCatNums.length > 0 ? await pool2.query(
+          `SELECT * FROM covcat WHERE CovCatNum IN (?)`,
+          [covCatNums]
+        ) : [[]];
+        const covCatMap = new Map(covCatRows.map((row) => [Number(row.CovCatNum), row]));
         const benefitsByPlan = /* @__PURE__ */ new Map();
         for (const b of benefitRows) {
           const list = benefitsByPlan.get(b.PlanNum) ?? [];
@@ -21259,28 +21395,64 @@ var RealLocalApiClient = class {
             patientExternalId: String(sub.Subscriber),
             carrierPayerId: carrierPayerId(carrier),
             groupNumber: plan ? plan.GroupNum : void 0,
+            groupName: plan ? plan.GroupName : void 0,
             subscriberId: sub.SubscriberID,
+            subscriberName: (() => {
+              const patient = patients.find((candidate) => candidate.externalId === String(sub.Subscriber));
+              return patient ? `${patient.firstName} ${patient.lastName}` : void 0;
+            })(),
+            relationshipToSubscriber: patPlanMap.get(Number(sub.InsSubNum))?.Relationship === null || patPlanMap.get(Number(sub.InsSubNum))?.Relationship === void 0 ? void 0 : Number(patPlanMap.get(Number(sub.InsSubNum))?.Relationship),
+            pending: Boolean(patPlanMap.get(Number(sub.InsSubNum))?.IsPending),
+            employerName: employerMap.get(Number(plan?.EmployerNum))?.EmpName,
             planName: plan ? plan.GroupName || carrier?.CarrierName || void 0 : void 0,
+            planType: plan ? String(plan.PlanType ?? "") || void 0 : void 0,
+            feeScheduleName: feeScheduleMap.get(Number(plan?.FeeSched))?.Description,
+            benefitPeriod: void 0,
+            orthoAgeLimit: void 0,
+            ordinal: Number(patPlanMap.get(Number(sub.InsSubNum))?.Ordinal) || void 0,
             effectiveDate: isDefaultDate(effDate) ? void 0 : effDate.toISOString().slice(0, 10),
             terminationDate: isDefaultDate(termDate) ? void 0 : termDate.toISOString().slice(0, 10),
             planStatus: isDefaultDate(termDate) || termDate > today ? "Active" : "Terminated",
-            benefitGrid: buildBenefitGrid(benefits),
-            frequencyLimits: {}
+            benefitGrid: buildBenefitGrid(benefits, covCatMap),
+            frequencyLimits: buildFrequencyLimits(benefits, covCatMap)
           };
         });
       }
     }
+    const [recallTypeRows] = await pool2.query("SELECT * FROM recalltype");
+    const recallTypeMap = new Map(
+      recallTypeRows.map((row) => [String(row.RecallTypeNum), String(row.Description)])
+    );
+    const [recallSourceRows] = await pool2.query("SELECT * FROM recall");
+    const recalls = recallSourceRows.map((row) => ({
+      externalId: String(row.RecallNum),
+      patientExternalId: String(row.PatNum),
+      type: row.RecallTypeNum === null || row.RecallTypeNum === void 0 ? void 0 : recallTypeMap.get(String(row.RecallTypeNum)) ?? String(row.RecallTypeNum),
+      dueDate: openDentalDate(row.DateDue),
+      scheduledDate: openDentalDate(row.DateScheduled)
+    }));
+    const [communicationSourceRows] = await pool2.query("SELECT * FROM commlog");
+    const communications = communicationSourceRows.map((row) => ({
+      externalId: String(row.CommlogNum),
+      patientExternalId: String(row.PatNum),
+      occurredAt: dateTime(row.CommDateTime),
+      description: typeof row.Note === "string" ? row.Note : void 0,
+      automated: Number(row.ProgramNum) > 0
+    }));
     let claims = [];
     if (patNums.length > 0) {
       const [claimRows] = await pool2.query(
         `SELECT c.*, ip.CarrierNum, cp.ClaimProcNum, cp.ProcNum,
+                pc.ProcCode,
                 pl.AptNum, a.AptStatus
            FROM claim c
            JOIN insplan ip ON c.PlanNum = ip.PlanNum
            LEFT JOIN claimproc cp ON cp.ClaimNum = c.ClaimNum
            LEFT JOIN procedurelog pl ON pl.ProcNum = cp.ProcNum
+           LEFT JOIN procedurecode pc ON pc.CodeNum = pl.CodeNum
            LEFT JOIN appointment a ON a.AptNum = pl.AptNum
-          WHERE c.PatNum IN (?)`,
+          WHERE c.PatNum IN (?)
+          ORDER BY c.ClaimNum, cp.LineNumber, cp.ClaimProcNum`,
         [patNums]
       );
       const claimCarrierNums = [
@@ -21295,6 +21467,7 @@ var RealLocalApiClient = class {
       );
       const claimLinkRows = /* @__PURE__ */ new Map();
       const claimRowsByNum = /* @__PURE__ */ new Map();
+      const claimProcedureCodes = /* @__PURE__ */ new Map();
       for (const row of claimRows) {
         const claimNum = Number(row.ClaimNum);
         if (!claimRowsByNum.has(claimNum)) {
@@ -21308,6 +21481,11 @@ var RealLocalApiClient = class {
           aptStatus: row.AptStatus
         });
         claimLinkRows.set(claimNum, links);
+        if (typeof row.ProcCode === "string" && row.ProcCode.trim()) {
+          const codes = claimProcedureCodes.get(claimNum) ?? [];
+          codes.push(row.ProcCode.trim());
+          claimProcedureCodes.set(claimNum, codes);
+        }
       }
       claims = [...claimRowsByNum.entries()].map(([claimNum, r]) => {
         const carrier = claimCarrierMap.get(r.CarrierNum);
@@ -21320,11 +21498,21 @@ var RealLocalApiClient = class {
           carrierPayerId: carrierPayerId(carrier),
           statusFromSource: r.ClaimStatus,
           claimDate: r.DateService ? r.DateService.toISOString().slice(0, 10) : void 0,
+          procedureCodes: claimProcedureCodes.get(claimNum),
           ...appointmentExternalId ? { appointmentExternalId } : {}
         };
       });
     }
-    return { patients, appointments, insurancePlans, claims, carriers };
+    return {
+      patients,
+      appointments,
+      insurancePlans,
+      claims,
+      carriers,
+      appointmentProcedures,
+      recalls,
+      communications
+    };
   }
   async fetchAppointmentSnapshot({
     from,
@@ -22928,21 +23116,51 @@ function aptStatusLabel(status) {
       return `Unknown(${status})`;
   }
 }
-function buildBenefitGrid(benefits) {
+function openDentalDate(value) {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime()) || value.getFullYear() <= 1901) {
+    return void 0;
+  }
+  return value.toISOString().slice(0, 10);
+}
+function buildBenefitGrid(benefits, categories) {
   const grid = {};
+  const categoryValues = {};
   for (const b of benefits) {
     const benefitType = b.BenefitType;
     const percent = b.Percent;
     const amount2 = b.MonetaryAmt;
     if (benefitType === 1 && percent >= 0) {
       grid[`percent_cat${b.CovCatNum}`] = percent;
+      const name = String(categories.get(Number(b.CovCatNum))?.Description ?? `covcat-${b.CovCatNum}`);
+      categoryValues[name] = { ...categoryValues[name] ?? {}, percent };
     }
     if ((benefitType === 2 || benefitType === 3) && amount2 > 0) {
       const label = benefitType === 3 ? `deductible_cat${b.CovCatNum}` : `monetaryAmt_cat${b.CovCatNum}`;
       grid[label] = amount2;
+      const name = String(categories.get(Number(b.CovCatNum))?.Description ?? `covcat-${b.CovCatNum}`);
+      categoryValues[name] = {
+        ...categoryValues[name] ?? {},
+        ...benefitType === 3 ? { deductible: amount2 } : { maximum: amount2 }
+      };
     }
   }
+  grid.categories = categoryValues;
   return grid;
+}
+function buildFrequencyLimits(benefits, categories) {
+  const result = {};
+  for (const benefit of benefits) {
+    if (benefit.Quantity === null || benefit.Quantity === void 0) continue;
+    const name = String(categories.get(Number(benefit.CovCatNum))?.Description ?? `covcat-${benefit.CovCatNum}`);
+    const values = result[name] ?? [];
+    values.push({
+      quantity: Number(benefit.Quantity),
+      qualifier: benefit.QuantityQualifier ?? null,
+      timePeriod: benefit.TimePeriod ?? null
+    });
+    result[name] = values;
+  }
+  return result;
 }
 
 // src/sync.ts
