@@ -369,16 +369,16 @@ var require_lib = __commonJS({
         }
         return sql;
       }
-      const identifier = String(value);
-      const hasJsonOperator = !forbidQualified && identifier.indexOf("->") !== -1;
+      const identifier2 = String(value);
+      const hasJsonOperator = !forbidQualified && identifier2.indexOf("->") !== -1;
       if (forbidQualified || hasJsonOperator) {
-        if (identifier.indexOf("`") === -1)
-          return `\`${identifier}\``;
-        return `\`${identifier.replace(regex.backtick, "``")}\``;
+        if (identifier2.indexOf("`") === -1)
+          return `\`${identifier2}\``;
+        return `\`${identifier2.replace(regex.backtick, "``")}\``;
       }
-      if (identifier.indexOf("`") === -1 && identifier.indexOf(".") === -1)
-        return `\`${identifier}\``;
-      return `\`${identifier.replace(regex.backtick, "``").replace(regex.dot, "`.`")}\``;
+      if (identifier2.indexOf("`") === -1 && identifier2.indexOf(".") === -1)
+        return `\`${identifier2}\``;
+      return `\`${identifier2.replace(regex.backtick, "``").replace(regex.dot, "`.`")}\``;
     };
     exports2.escapeId = escapeId;
     var objectToValues = (object, timezone) => {
@@ -20246,6 +20246,188 @@ function safeConfigLog(config) {
   };
 }
 
+// ../shared/schema-diagnostics.ts
+var DIAGNOSTIC_TABLES = [
+  "appointment",
+  "benefit",
+  "carrier",
+  "claim",
+  "claimpayment",
+  "claimproc",
+  "clinic",
+  "definition",
+  "insplan",
+  "inssub",
+  "patient",
+  "patplan",
+  "procedurecode",
+  "procedurelog",
+  "provider",
+  "userod"
+];
+var DIAGNOSTIC_PROFILE_COLUMNS = {
+  appointment: ["AptNum", "AptDateTime", "PatNum", "AptStatus"],
+  benefit: ["BenefitNum", "PlanNum", "CodeNum", "Percent"],
+  carrier: ["CarrierNum", "CarrierName", "ElectID"],
+  claim: ["ClaimNum", "PatNum", "PlanNum", "ClaimDate", "ClaimStatus"],
+  claimpayment: ["ClaimPaymentNum", "ClaimNum", "PayAmt"],
+  claimproc: ["ClaimProcNum", "ClaimNum", "ProcNum", "Status", "FeeBilled"],
+  clinic: ["ClinicNum", "Description"],
+  definition: ["DefNum", "Category", "ItemName"],
+  insplan: ["PlanNum", "CarrierNum", "GroupNum", "PlanNote"],
+  inssub: ["InsSubNum", "Subscriber", "SubscriberID"],
+  patient: ["PatNum", "LName", "FName", "Birthdate", "Email"],
+  patplan: ["PatPlanNum", "PatNum", "InsSubNum"],
+  procedurecode: ["CodeNum", "ProcCode", "Descript"],
+  procedurelog: ["ProcNum", "PatNum", "CodeNum", "ProcDate", "ProcStatus"],
+  provider: ["ProvNum", "LName", "FName"],
+  userod: ["UserNum", "UserName"]
+};
+function diagnosticTable(value) {
+  return typeof value === "string" && DIAGNOSTIC_TABLES.includes(value) ? value : null;
+}
+function diagnosticProfileColumns(table) {
+  return DIAGNOSTIC_PROFILE_COLUMNS[table];
+}
+
+// src/opendental/diagnostics.ts
+var MAX_STATEMENT_SECONDS = 10;
+function identifier(value) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+    throw new Error("unsafe SQL identifier");
+  }
+  return `\`${value.replaceAll("`", "``")}\``;
+}
+async function boundedQuery(pool2, sql, values) {
+  await pool2.query(`SET SESSION max_statement_time = ${MAX_STATEMENT_SECONDS}`);
+  const [rows] = await pool2.query(sql, values);
+  return rows;
+}
+function isAggregateRangeType(type) {
+  return /int|decimal|numeric|float|double|date|time|year/.test(type.toLowerCase());
+}
+async function readStructuralInventory(pool2) {
+  const tables = await boundedQuery(
+    pool2,
+    `SELECT TABLE_SCHEMA AS schemaName, TABLE_NAME AS tableName
+       FROM information_schema.TABLES
+      WHERE TABLE_SCHEMA = DATABASE()
+      ORDER BY TABLE_NAME`
+  );
+  const columns = await boundedQuery(
+    pool2,
+    `SELECT TABLE_NAME AS tableName, COLUMN_NAME AS columnName,
+            COLUMN_TYPE AS columnType, IS_NULLABLE AS nullable,
+            COLUMN_DEFAULT AS defaultValue
+       FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+      ORDER BY TABLE_NAME, ORDINAL_POSITION`
+  );
+  const version = await boundedQuery(
+    pool2,
+    "SELECT VERSION() AS serverVersion, @@version_comment AS serverComment"
+  );
+  const schemaName = String(tables[0]?.schemaName ?? "");
+  const result = {
+    database: schemaName,
+    serverVersion: String(version[0]?.serverVersion ?? ""),
+    serverComment: String(version[0]?.serverComment ?? ""),
+    tables: {}
+  };
+  for (const row of columns) {
+    const table = String(row.tableName);
+    (result.tables[table] ??= []).push({
+      table,
+      name: String(row.columnName),
+      type: String(row.columnType),
+      nullable: String(row.nullable),
+      defaultValue: row.defaultValue == null ? "" : String(row.defaultValue)
+    });
+  }
+  for (const row of tables) result.tables[String(row.tableName)] ??= [];
+  return result;
+}
+async function readInventoryRowCounts(pool2) {
+  const result = {};
+  for (const table of DIAGNOSTIC_TABLES) {
+    const rows = await boundedQuery(
+      pool2,
+      `SELECT COUNT(*) AS rowCount FROM ${identifier(table)}`
+    );
+    result[table] = Number(rows[0]?.rowCount ?? 0);
+  }
+  return result;
+}
+async function readColumnProfiles(pool2, requested) {
+  if (!Array.isArray(requested) || requested.length === 0 || requested.length > 32) {
+    throw new Error("columns must contain between 1 and 32 entries");
+  }
+  const profiles = [];
+  for (const item of requested) {
+    if (!item || typeof item !== "object") throw new Error("invalid profile column");
+    const table = diagnosticTable(item.table);
+    const column = item.column;
+    if (!table || typeof column !== "string" || !diagnosticProfileColumns(table).includes(column)) {
+      throw new Error("requested table or column is not allowlisted");
+    }
+    const metadata = await boundedQuery(
+      pool2,
+      `SELECT COLUMN_TYPE AS columnType, IS_NULLABLE AS nullable
+         FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+      [table, column]
+    );
+    if (metadata.length === 0) {
+      throw new Error(`allowlisted column is absent: ${table}.${column}`);
+    }
+    const type = String(metadata[0].columnType);
+    const quotedTable = identifier(table);
+    const quotedColumn = identifier(column);
+    const rows = await boundedQuery(
+      pool2,
+      `SELECT
+         COUNT(*) AS totalCount,
+         SUM(CASE WHEN ${quotedColumn} IS NOT NULL THEN 1 ELSE 0 END) AS nonNullCount,
+         SUM(CASE WHEN ${quotedColumn} IS NOT NULL
+                    AND TRIM(CAST(${quotedColumn} AS CHAR)) = '' THEN 1 ELSE 0 END) AS blankCount,
+         COUNT(DISTINCT ${quotedColumn}) AS distinctCount,
+         SUM(CASE WHEN ${quotedColumn} IS NOT NULL
+                    AND CAST(${quotedColumn} AS CHAR) REGEXP '^[0-9]+$' THEN 1 ELSE 0 END) AS digitsOnly,
+         SUM(CASE WHEN ${quotedColumn} IS NOT NULL
+                    AND CAST(${quotedColumn} AS CHAR) REGEXP '^[A-Za-z]+$' THEN 1 ELSE 0 END) AS lettersOnly,
+         SUM(CASE WHEN ${quotedColumn} IS NOT NULL
+                    AND CAST(${quotedColumn} AS CHAR) REGEXP '[A-Za-z]' THEN 1 ELSE 0 END) AS containsLetters,
+         ${isAggregateRangeType(type) ? `MIN(${quotedColumn}) AS minValue, MAX(${quotedColumn}) AS maxValue` : "NULL AS minValue, NULL AS maxValue"}
+       FROM ${quotedTable}`
+    );
+    const row = rows[0] ?? {};
+    const nonNullCount = Number(row.nonNullCount ?? 0);
+    const blankCount = Number(row.blankCount ?? 0);
+    const digitsOnly = Number(row.digitsOnly ?? 0);
+    const lettersOnly = Number(row.lettersOnly ?? 0);
+    const containsLetters = Number(row.containsLetters ?? 0);
+    profiles.push({
+      table,
+      column,
+      type,
+      nullable: String(metadata[0].nullable),
+      nonNullCount,
+      blankCount,
+      distinctCount: Number(row.distinctCount ?? 0),
+      min: row.minValue == null ? null : row.minValue,
+      max: row.maxValue == null ? null : row.maxValue,
+      patternCounts: {
+        blank: blankCount,
+        digitsOnly,
+        lettersOnly,
+        containsLetters,
+        other: Math.max(0, nonNullCount - blankCount - digitsOnly - lettersOnly)
+      }
+    });
+  }
+  return profiles;
+}
+
 // src/opendental/local-api.ts
 var OD_APPOINTMENT_STATUS_SCHEDULED = 1;
 var OD_APPOINTMENT_STATUS_BROKEN = 5;
@@ -20976,6 +21158,15 @@ var RealLocalApiClient = class {
     } catch {
       return false;
     }
+  }
+  async runStructuralInventory() {
+    return readStructuralInventory(this.getPool());
+  }
+  async runInventoryRowCounts() {
+    return readInventoryRowCounts(this.getPool());
+  }
+  async runColumnProfiles(columns) {
+    return readColumnProfiles(this.getPool(), columns);
   }
   async fetchSyncSnapshot({ horizonDays }) {
     const pool2 = this.getPool();
@@ -27505,6 +27696,47 @@ async function runRead(job, localApi) {
         },
         readAt: snapshot.readAt
       };
+    }
+    case "opendental.diagnostics.structural-inventory": {
+      if (!localApi.runStructuralInventory) {
+        return {
+          status: "error",
+          errorCode: "unsupported_local_api",
+          errorMessage: "Structural diagnostics require the real Open Dental client"
+        };
+      }
+      const payload = await localApi.runStructuralInventory();
+      return { status: "success", payload, readAt: (/* @__PURE__ */ new Date()).toISOString() };
+    }
+    case "opendental.diagnostics.row-counts": {
+      if (!localApi.runInventoryRowCounts) {
+        return {
+          status: "error",
+          errorCode: "unsupported_local_api",
+          errorMessage: "Row-count diagnostics require the real Open Dental client"
+        };
+      }
+      const payload = await localApi.runInventoryRowCounts();
+      return { status: "success", payload, readAt: (/* @__PURE__ */ new Date()).toISOString() };
+    }
+    case "opendental.diagnostics.column-profile": {
+      if (!localApi.runColumnProfiles) {
+        return {
+          status: "error",
+          errorCode: "unsupported_local_api",
+          errorMessage: "Column-profile diagnostics require the real Open Dental client"
+        };
+      }
+      try {
+        const payload = await localApi.runColumnProfiles(job.params.columns);
+        return { status: "success", payload: { profiles: payload }, readAt: (/* @__PURE__ */ new Date()).toISOString() };
+      } catch (err) {
+        return {
+          status: "error",
+          errorCode: "diagnostic_allowlist_rejected",
+          errorMessage: err instanceof Error ? err.message : String(err)
+        };
+      }
     }
     default:
       return {
